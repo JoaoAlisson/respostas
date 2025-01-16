@@ -1,170 +1,199 @@
 "use client"
 
-import Image from "next/image";
-import { useEffect } from "react";
+import { useRef, useEffect, useState } from "react";
+import Webcam from "react-webcam";
 
 export default function Home() {
-  let video: unknown = null;
-  let canvas: unknown = null;
-  let ctx: unknown = null;
-  let captureButton: unknown = null;
+  const webcamRef = useRef(null);
+  const canvasRef = useRef(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [opencvLoaded, setOpenCVLoaded] = useState(false);
 
   useEffect(() => {
-    // video = document.getElementById('video');
-    // canvas = document.getElementById('canvas');
-    // ctx = canvas?.getContext('2d');
-    // captureButton = document.getElementById('capture');
+    const loadOpenCV = async () => {
+      if (typeof cv !== "undefined") {
+        console.log("OpenCV.js carregado com sucesso.");
+        cv = await cv;
+        setOpenCVLoaded(true);
+      } else {
+        console.error("Falha ao carregar OpenCV.js. Verifique se foi incluído.");
+      }
+    };
+    loadOpenCV();
   }, []);
 
-  // Acessar a câmera do dispositivo
-  async function startCamera() {
+  const captureAndProcess = () => {
+    if (!opencvLoaded || isProcessing) return;
+
+    setIsProcessing(true);
+    const canvas = canvasRef.current;
+    const context = canvas.getContext("2d");
+    const video = webcamRef.current.video;
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const imgData = context.getImageData(0, 0, canvas.width, canvas.height);
+    const src = cv.matFromImageData(imgData);
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      // video?.srcObject = stream;
-    } catch (error) {
-      console.error('Erro ao acessar a câmera:', error);
-      alert('Não foi possível acessar a câmera. Verifique as permissões.');
-    }
-  }
-
-  // Capturar o frame do vídeo e processar
-  function captureAndProcess() {
-      // Configurar o canvas com a mesma dimensão do vídeo
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-
-      // Desenhar o frame do vídeo no canvas
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      // Carregar a imagem para o OpenCV
-      const src = cv.imread(canvas);
+      // Pré-processamento da imagem
       const gray = new cv.Mat();
-      const thresh = new cv.Mat();
-      const contours = new cv.MatVector();
-      const hierarchy = new cv.Mat();
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-      // Converter para escala de cinza
-      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+      // Inverter as cores para que os quadrados pretos se destaquem
+      const inverted = new cv.Mat();
+      cv.bitwise_not(gray, inverted);
 
-      // Aplicar binarização
-      cv.threshold(gray, thresh, 127, 255, cv.THRESH_BINARY);
+      // Aplicar desfoque para melhorar a detecção
+      const blurred = new cv.Mat();
+      cv.GaussianBlur(inverted, blurred, new cv.Size(5, 5), 0);
+
+      // Detecção de bordas usando Canny
+      const edges = new cv.Mat();
+      cv.Canny(blurred, edges, 50, 150);
 
       // Detectar contornos
-      cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+      const contours = new cv.MatVector();
+      const hierarchy = new cv.Mat();
+      cv.findContours(
+        edges,
+        contours,
+        hierarchy,
+        cv.RETR_LIST,
+        cv.CHAIN_APPROX_SIMPLE
+      );
 
-      // Identificar respostas
+      const contoursOutput = src.clone();
+      let squareCount = 0;
+      const rectangles = []; // Armazenar os quadrados encontrados
+
+      // Iterar sobre os contornos e identificar quadrados
       for (let i = 0; i < contours.size(); i++) {
-        const contour = contours.get(i);
-        const rect = cv.boundingRect(contour);
+        const cnt = contours.get(i);
+        const approx = new cv.Mat();
+        const peri = cv.arcLength(cnt, true);
 
-        // Filtrar regiões de resposta (ajuste os limites de tamanho)
-        if (rect.width > 10 && rect.height > 10 && rect.width < 50 && rect.height < 50) {
-          const x = rect.x + rect.width / 2;
-          const y = rect.y + rect.height / 2;
+        // Aproximar o contorno para identificar quadrados
+        cv.approxPolyDP(cnt, approx, 0.1 * peri, true);
 
-          // Marcar a resposta detectada
-          ctx.beginPath();
-          ctx.arc(x, y, 5, 0, 2 * Math.PI);
-          ctx.fillStyle = "red";
-          ctx.fill();
+        if (approx.rows === 4 && cv.isContourConvex(approx)) {
+          const rect = cv.boundingRect(approx);
+          
+          // Verificar se o quadrado foi rasurado (média de intensidade)
+          const roi = inverted.roi(rect);
+          const mean = cv.mean(roi); // Média de intensidade no quadrado
+          const isRasurado = mean[0] > 200; // Limiar para rasura (ajustável)
+
+          // Verificar se o quadrado não está dentro de outro quadrado
+          let isContained = false;
+          for (let j = 0; j < rectangles.length; j++) {
+            const existingRect = rectangles[j];
+            // Se o quadrado atual está dentro de outro quadrado, não contar
+            if (
+              rect.x >= existingRect.x &&
+              rect.y >= existingRect.y &&
+              rect.x + rect.width <= existingRect.x + existingRect.width &&
+              rect.y + rect.height <= existingRect.y + existingRect.height
+            ) {
+              isContained = true;
+              break;
+            }
+          }
+
+          // Se não está dentro de outro quadrado, conta e desenha
+          if (!isContained) {
+            const color = isRasurado ? new cv.Scalar(0, 0, 255, 255) : new cv.Scalar(0, 255, 0, 255);
+            cv.drawContours(contoursOutput, contours, i, color, 2); // Cor: vermelho para rasurado, verde para normal
+            rectangles.push(rect); // Adicionar o quadrado ao array de quadrados encontrados
+            squareCount++; // Incrementar contador de quadrados identificados
+          }
+
+          roi.delete(); // Limpar região de interesse
         }
+
+        approx.delete();
       }
 
-      // Limpeza
-      src.delete();
+      // Adicionar a quantidade de quadrados identificados na imagem
+      const text = `Quadrados Identificados: ${squareCount}`;
+      const font = cv.FONT_HERSHEY_SIMPLEX;
+      const scale = 1;
+      const colorText = new cv.Scalar(255, 255, 255, 255); // Cor branca para o texto
+      const thickness = 2;
+      const position = new cv.Point(10, 50); // Posição do texto
+      cv.putText(contoursOutput, text, position, font, scale, colorText, thickness, cv.LINE_AA);
+
+      // Adicionar a data e hora na imagem
+      const date = new Date();
+      const dateStr = date.toLocaleString();
+      const positionDate = new cv.Point(10, 30);
+      cv.putText(contoursOutput, dateStr, positionDate, font, scale, colorText, thickness, cv.LINE_AA);
+
+      // Mostrar a imagem com contornos e quantidade de quadrados identificados
+      cv.imshow(canvas, contoursOutput);
+
+      // Limpar recursos
       gray.delete();
-      thresh.delete();
+      inverted.delete();
+      blurred.delete();
+      edges.delete();
       contours.delete();
       hierarchy.delete();
-  }
+      contoursOutput.delete();
+    } catch (err) {
+      console.error("Erro ao processar imagem:", err);
+    } finally {
+      src.delete();
+      setIsProcessing(false);
+    }
+  };
+
+
 
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
-
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+    <div style={{ textAlign: "center" }}>
+      <h1>Leitor de Cartão Resposta</h1>
+      {opencvLoaded ? (
+        <>
+          <Webcam
+            ref={webcamRef}
+            style={{
+              width: "100%",
+              maxWidth: "640px",
+              border: "1px solid black",
+            }}
+          />
+          <canvas
+            ref={canvasRef}
+            style={{
+              display: "block",
+              marginTop: "20px",
+              width: "100%",
+              maxWidth: "640px",
+              border: "1px solid black",
+            }}
+          ></canvas>
+          <button
+            onClick={captureAndProcess}
+            disabled={isProcessing}
+            style={{
+              marginTop: "20px",
+              padding: "10px 20px",
+              backgroundColor: "#0070f3",
+              color: "#fff",
+              border: "none",
+              cursor: "pointer",
+            }}
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+            {isProcessing ? "Processando..." : "Capturar e Processar"}
+          </button>
+        </>
+      ) : (
+        <p>Carregando OpenCV.js...</p>
+      )}
     </div>
   );
 }

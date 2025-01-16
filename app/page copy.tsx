@@ -1,0 +1,199 @@
+"use client"
+
+import { useRef, useEffect, useState } from "react";
+import Webcam from "react-webcam";
+
+export default function Home() {
+  const webcamRef = useRef(null);
+  const canvasRef = useRef(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [opencvLoaded, setOpenCVLoaded] = useState(false);
+
+  useEffect(() => {
+    const loadOpenCV = async () => {
+      if (typeof cv !== "undefined") {
+        console.log("OpenCV.js carregado com sucesso.");
+        cv = await cv;
+        setOpenCVLoaded(true);
+      } else {
+        console.error("Falha ao carregar OpenCV.js. Verifique se foi incluído.");
+      }
+    };
+    loadOpenCV();
+  }, []);
+
+  const captureAndProcess = () => {
+    if (!opencvLoaded || isProcessing) return;
+
+    setIsProcessing(true);
+    const canvas = canvasRef.current;
+    const context = canvas.getContext("2d");
+    const video = webcamRef.current.video;
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const imgData = context.getImageData(0, 0, canvas.width, canvas.height);
+    const src = cv.matFromImageData(imgData);
+
+    try {
+      // Pré-processamento da imagem
+      const gray = new cv.Mat();
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+      // Inverter as cores para que os quadrados pretos se destaquem
+      const inverted = new cv.Mat();
+      cv.bitwise_not(gray, inverted);
+
+      // Aplicar desfoque para melhorar a detecção
+      const blurred = new cv.Mat();
+      cv.GaussianBlur(inverted, blurred, new cv.Size(5, 5), 0);
+
+      // Detecção de bordas usando Canny
+      const edges = new cv.Mat();
+      cv.Canny(blurred, edges, 50, 150);
+
+      // Detectar contornos
+      const contours = new cv.MatVector();
+      const hierarchy = new cv.Mat();
+      cv.findContours(
+        edges,
+        contours,
+        hierarchy,
+        cv.RETR_LIST,
+        cv.CHAIN_APPROX_SIMPLE
+      );
+
+      const contoursOutput = src.clone();
+      let squareCount = 0;
+      const rectangles = []; // Armazenar os quadrados encontrados
+
+      // Iterar sobre os contornos e identificar quadrados
+      for (let i = 0; i < contours.size(); i++) {
+        const cnt = contours.get(i);
+        const approx = new cv.Mat();
+        const peri = cv.arcLength(cnt, true);
+
+        // Aproximar o contorno para identificar quadrados
+        cv.approxPolyDP(cnt, approx, 0.1 * peri, true);
+
+        if (approx.rows === 4 && cv.isContourConvex(approx)) {
+          const rect = cv.boundingRect(approx);
+          
+          // Verificar se o quadrado foi rasurado (média de intensidade)
+          const roi = inverted.roi(rect);
+          const mean = cv.mean(roi); // Média de intensidade no quadrado
+          const isRasurado = mean[0] > 200; // Limiar para rasura (ajustável)
+
+          // Verificar se o quadrado não está dentro de outro quadrado
+          let isContained = false;
+          for (let j = 0; j < rectangles.length; j++) {
+            const existingRect = rectangles[j];
+            // Se o quadrado atual está dentro de outro quadrado, não contar
+            if (
+              rect.x >= existingRect.x &&
+              rect.y >= existingRect.y &&
+              rect.x + rect.width <= existingRect.x + existingRect.width &&
+              rect.y + rect.height <= existingRect.y + existingRect.height
+            ) {
+              isContained = true;
+              break;
+            }
+          }
+
+          // Se não está dentro de outro quadrado, conta e desenha
+          if (!isContained) {
+            const color = isRasurado ? new cv.Scalar(0, 0, 255, 255) : new cv.Scalar(0, 255, 0, 255);
+            cv.drawContours(contoursOutput, contours, i, color, 2); // Cor: vermelho para rasurado, verde para normal
+            rectangles.push(rect); // Adicionar o quadrado ao array de quadrados encontrados
+            squareCount++; // Incrementar contador de quadrados identificados
+          }
+
+          roi.delete(); // Limpar região de interesse
+        }
+
+        approx.delete();
+      }
+
+      // Adicionar a quantidade de quadrados identificados na imagem
+      const text = `Quadrados Identificados: ${squareCount}`;
+      const font = cv.FONT_HERSHEY_SIMPLEX;
+      const scale = 1;
+      const colorText = new cv.Scalar(255, 255, 255, 255); // Cor branca para o texto
+      const thickness = 2;
+      const position = new cv.Point(10, 50); // Posição do texto
+      cv.putText(contoursOutput, text, position, font, scale, colorText, thickness, cv.LINE_AA);
+
+      // Adicionar a data e hora na imagem
+      const date = new Date();
+      const dateStr = date.toLocaleString();
+      const positionDate = new cv.Point(10, 30);
+      cv.putText(contoursOutput, dateStr, positionDate, font, scale, colorText, thickness, cv.LINE_AA);
+
+      // Mostrar a imagem com contornos e quantidade de quadrados identificados
+      cv.imshow(canvas, contoursOutput);
+
+      // Limpar recursos
+      gray.delete();
+      inverted.delete();
+      blurred.delete();
+      edges.delete();
+      contours.delete();
+      hierarchy.delete();
+      contoursOutput.delete();
+    } catch (err) {
+      console.error("Erro ao processar imagem:", err);
+    } finally {
+      src.delete();
+      setIsProcessing(false);
+    }
+  };
+
+
+
+  return (
+    <div style={{ textAlign: "center" }}>
+      <h1>Leitor de Cartão Resposta</h1>
+      {opencvLoaded ? (
+        <>
+          <Webcam
+            ref={webcamRef}
+            style={{
+              width: "100%",
+              maxWidth: "640px",
+              border: "1px solid black",
+            }}
+          />
+          <canvas
+            ref={canvasRef}
+            style={{
+              display: "block",
+              marginTop: "20px",
+              width: "100%",
+              maxWidth: "640px",
+              border: "1px solid black",
+            }}
+          ></canvas>
+          <button
+            onClick={captureAndProcess}
+            disabled={isProcessing}
+            style={{
+              marginTop: "20px",
+              padding: "10px 20px",
+              backgroundColor: "#0070f3",
+              color: "#fff",
+              border: "none",
+              cursor: "pointer",
+            }}
+          >
+            {isProcessing ? "Processando..." : "Capturar e Processar"}
+          </button>
+        </>
+      ) : (
+        <p>Carregando OpenCV.js...</p>
+      )}
+    </div>
+  );
+}
