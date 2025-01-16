@@ -13,6 +13,7 @@ export default function Home() {
     const loadOpenCV = async () => {
       if (typeof cv !== "undefined") {
         console.log("OpenCV.js carregado com sucesso.");
+        // @ts-ignore 
         cv = await cv;
         setOpenCVLoaded(true);
       } else {
