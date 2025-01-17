@@ -25,157 +25,117 @@ export default function Home() {
     loadOpenCV();
   }, []);
 
+
   const captureAndProcess = () => {
     if (!opencvLoaded || isProcessing) return;
 
     setIsProcessing(true);
     const canvas = canvasRef.current;
-    // @ts-ignore 
     const context = canvas.getContext("2d");
-    // @ts-ignore 
     const video = webcamRef.current.video;
 
-    // @ts-ignore 
     canvas.width = video.videoWidth;
-    // @ts-ignore 
     canvas.height = video.videoHeight;
 
-    // @ts-ignore 
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // @ts-ignore 
     const imgData = context.getImageData(0, 0, canvas.width, canvas.height);
-    // @ts-ignore 
     const src = cv.matFromImageData(imgData);
 
     try {
-      // Pré-processamento da imagem
-      // @ts-ignore 
       const gray = new cv.Mat();
-      // @ts-ignore 
       cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-      // Inverter as cores para que os quadrados pretos se destaquem
-      // @ts-ignore 
-      const inverted = new cv.Mat();
-      // @ts-ignore 
-      cv.bitwise_not(gray, inverted);
-
-      // Aplicar desfoque para melhorar a detecção
-      // @ts-ignore 
       const blurred = new cv.Mat();
-      // @ts-ignore 
-      cv.GaussianBlur(inverted, blurred, new cv.Size(5, 5), 0);
+      cv.GaussianBlur(gray, blurred, new cv.Size(7, 7), 0);
 
-      // Detecção de bordas usando Canny
-      // @ts-ignore 
       const edges = new cv.Mat();
-      // @ts-ignore 
-      cv.Canny(blurred, edges, 50, 150);
+      cv.Canny(blurred, edges, 30, 100);
 
-      // Detectar contornos
-      // @ts-ignore 
       const contours = new cv.MatVector();
-      // @ts-ignore 
       const hierarchy = new cv.Mat();
-      // @ts-ignore 
       cv.findContours(
         edges,
         contours,
         hierarchy,
-        // @ts-ignore 
         cv.RETR_LIST,
-        // @ts-ignore 
         cv.CHAIN_APPROX_SIMPLE
       );
 
       const contoursOutput = src.clone();
       let squareCount = 0;
-      const rectangles = []; // Armazenar os quadrados encontrados
 
-      // Iterar sobre os contornos e identificar quadrados
-      for (let i = 0; i < contours.size(); i++) {
-        const cnt = contours.get(i);
-        // @ts-ignore 
-        const approx = new cv.Mat();
-        // @ts-ignore 
-        const peri = cv.arcLength(cnt, true);
+      const MAX_SQUARE_SIZE = 150; // Tamanho máximo do quadrado
+const MIN_SQUARE_SIZE = 10; // Tamanho mínimo do quadrado
+const APPROX_TOLERANCE = 0.1; // Tolerância para aproximação de polígonos (precisão de formato)
 
-        // Aproximar o contorno para identificar quadrados
-        // @ts-ignore 
-        cv.approxPolyDP(cnt, approx, 0.1 * peri, true);
+const rectangles = []; // Array para armazenar os quadrados encontrados
 
-        // @ts-ignore 
-        if (approx.rows === 4 && cv.isContourConvex(approx)) {
-          // @ts-ignore 
-          const rect = cv.boundingRect(approx);
-          
-          // Verificar se o quadrado foi rasurado (média de intensidade)
-          const roi = inverted.roi(rect);
-          // @ts-ignore 
-          const mean = cv.mean(roi); // Média de intensidade no quadrado
-          const isRasurado = mean[0] > 200; // Limiar para rasura (ajustável)
+for (let i = 0; i < contours.size(); i++) {
+  const cnt = contours.get(i);
+  const approx = new cv.Mat();
+  const peri = cv.arcLength(cnt, true);
 
-          // Verificar se o quadrado não está dentro de outro quadrado
-          let isContained = false;
-          for (let j = 0; j < rectangles.length; j++) {
-            const existingRect = rectangles[j];
-            // Se o quadrado atual está dentro de outro quadrado, não contar
-            if (
-              rect.x >= existingRect.x &&
-              rect.y >= existingRect.y &&
-              rect.x + rect.width <= existingRect.x + existingRect.width &&
-              rect.y + rect.height <= existingRect.y + existingRect.height
-            ) {
-              isContained = true;
-              break;
-            }
-          }
+  // Aproximar o contorno com tolerância ajustável
+  // A tolerância ajusta a precisão da forma para o número de vértices (polígono aproximado)
+  cv.approxPolyDP(cnt, approx, APPROX_TOLERANCE * peri, true);
 
-          // Se não está dentro de outro quadrado, conta e desenha
-          if (!isContained) {
-            // @ts-ignore 
-            const color = isRasurado ? new cv.Scalar(0, 0, 255, 255) : new cv.Scalar(0, 255, 0, 255);
-            // @ts-ignore 
-            cv.drawContours(contoursOutput, contours, i, color, 2); // Cor: vermelho para rasurado, verde para normal
-            rectangles.push(rect); // Adicionar o quadrado ao array de quadrados encontrados
-            squareCount++; // Incrementar contador de quadrados identificados
-          }
+  if (approx.rows === 4 && cv.isContourConvex(approx)) {
+    const rect = cv.boundingRect(approx);
 
-          roi.delete(); // Limpar região de interesse
-        }
+    // Verificar tamanho do quadrado
+    if (
+      rect.width > MAX_SQUARE_SIZE ||
+      rect.height > MAX_SQUARE_SIZE ||
+      rect.width < MIN_SQUARE_SIZE ||
+      rect.height < MIN_SQUARE_SIZE
+    ) {
+      approx.delete();
+      continue;
+    }
 
-        approx.delete();
+    // Verificar se o quadrado está dentro de outro quadrado
+    let isContained = false;
+    for (let j = 0; j < rectangles.length; j++) {
+      const existingRect = rectangles[j];
+      // Se o quadrado atual está dentro de outro quadrado, não contar
+      if (
+        rect.x >= existingRect.x &&
+        rect.y >= existingRect.y &&
+        rect.x + rect.width <= existingRect.x + existingRect.width &&
+        rect.y + rect.height <= existingRect.y + existingRect.height
+      ) {
+        isContained = true;
+        break;
       }
+    }
 
-      // Adicionar a quantidade de quadrados identificados na imagem
-      const text = `Quadrados Identificados: ${squareCount}`;
-      // @ts-ignore 
+    // Se o quadrado não estiver contido, desenhar e adicionar
+    if (!isContained) {
+      cv.drawContours(contoursOutput, contours, i, new cv.Scalar(0, 255, 0, 255), 2); // Verde para quadrados
+      rectangles.push(rect); // Adicionar à lista de quadrados encontrados
+      squareCount++; // Incrementar contador de quadrados
+    }
+  } else {
+    // Desenhar em vermelho para contornos que não são quadrados
+    cv.drawContours(contoursOutput, contours, i, new cv.Scalar(0, 0, 255, 255), 2); // Vermelho para não quadrados
+  }
+
+  approx.delete();
+}
+
+      const text = `Quadrados Pretos Identificados: ${squareCount}`;
       const font = cv.FONT_HERSHEY_SIMPLEX;
       const scale = 1;
-      // @ts-ignore 
-      const colorText = new cv.Scalar(255, 255, 255, 255); // Cor branca para o texto
+      const colorText = new cv.Scalar(255, 255, 255, 255);
       const thickness = 2;
-      // @ts-ignore 
-      const position = new cv.Point(10, 50); // Posição do texto
-      // @ts-ignore 
+      const position = new cv.Point(10, 50);
+
       cv.putText(contoursOutput, text, position, font, scale, colorText, thickness, cv.LINE_AA);
 
-      // Adicionar a data e hora na imagem
-      const date = new Date();
-      const dateStr = date.toLocaleString();
-      // @ts-ignore 
-      const positionDate = new cv.Point(10, 30);
-      // @ts-ignore 
-      cv.putText(contoursOutput, dateStr, positionDate, font, scale, colorText, thickness, cv.LINE_AA);
-
-      // Mostrar a imagem com contornos e quantidade de quadrados identificados
-      // @ts-ignore 
       cv.imshow(canvas, contoursOutput);
 
-      // Limpar recursos
       gray.delete();
-      inverted.delete();
       blurred.delete();
       edges.delete();
       contours.delete();
